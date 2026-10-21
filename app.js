@@ -85,7 +85,7 @@ function deepSearch(batches, query) {
   const rawQuery = query.trim().toLowerCase();
   if (!rawQuery) return batches;
   const queryWords = rawQuery.split(/\s+/).filter(Boolean);
-  // sort is stable, so equal scores keep the list order (JEE/NEET/Boards first, newest first)
+  // sort is stable, so equal scores keep the list order (NEET/JEE first, newest first)
   return batches
     .map((batch) => ({ batch, score: deepSearchScore(batch, queryWords, rawQuery) }))
     .filter((entry) => entry.score > 0)
