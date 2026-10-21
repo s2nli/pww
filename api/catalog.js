@@ -10,16 +10,21 @@ function parseExam(exam) {
   return String(exam);
 }
 
-function categoryOf(text) {
+function categoryOf(text, cls) {
   const t = String(text || "").toLowerCase();
+  if (/\bneet\b|\baiims\b|pre[- ]?medical/.test(t)) return "neet";
+  if (/\bjee\b|\biit\b/.test(t)) return "jee";
+  if (/board|cbse|icse|\bbseb\b|10th|12th|class[- ]?10\b/.test(t) || String(cls) === "10") return "boards";
   if (/bank|ibps|sbi|rbi/.test(t)) return "banking";
   if (/upsc|ias|pcs/.test(t)) return "upsc";
   if (/ssc|cgl|chsl|railway|rrb|ntpc/.test(t)) return "ssc";
-  if (/neet/.test(t)) return "neet";
-  if (/jee/.test(t)) return "jee";
-  if (/gate/.test(t)) return "gate";
+  if (/\bgate\b/.test(t)) return "gate";
   return "other";
 }
+
+// JEE / NEET / Boards first, then everything else; newest first inside each group
+const PRIORITY = { neet: 0, jee: 0, boards: 0 };
+const ts = (v) => { const n = Date.parse(v); return isNaN(n) ? 0 : n; };
 
 async function load() {
   const res = await fetch(CATALOG_URL, { headers: { Accept: "application/json", "User-Agent": UA } });
@@ -40,12 +45,12 @@ async function load() {
       previewImage: r.photo || "",
       startDate: r.start_date || "",
       type: "MC_BATCH",
-      category: categoryOf(exam + " " + r.name),
+      category: categoryOf(exam + " " + r.name + " " + (r.class ? "class " + r.class : ""), r.class),
       slug: String(r.batch_id),
-      _u: r.updated_at || ""
+      _u: Math.max(ts(r.start_date), ts(r.updated_at) ),
     });
   }
-  out.sort((a, b) => String(b._u).localeCompare(String(a._u)));
+  out.sort((a, b) => ((a.category in PRIORITY) ? 0 : 1) - ((b.category in PRIORITY) ? 0 : 1) || b._u - a._u);
   out.forEach((b) => delete b._u);
   return out;
 }
