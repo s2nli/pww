@@ -22,8 +22,16 @@ function categoryOf(text, cls) {
   return "other";
 }
 
-// JEE / NEET / Boards first, then everything else; newest first inside each group
-const PRIORITY = { neet: 0, jee: 0, boards: 0 };
+// NEET / JEE first, then everything else; newest first inside each group
+const PRIORITY = { neet: 0, jee: 0 };
+// Pinned on top (in this order): Arjuna / Lakshya / Prayas / Yakeen / Abhiyaan 2027, incl. their 2.0, 3.0 ... versions
+const PINNED = [/\barjuna\b/, /\blakshya\b/, /\bprayas\b/, /\byakeen\b/, /\babhiyaa?n\b/];
+const pinRank = (name) => {
+  const t = String(name || "").toLowerCase();
+  if (!/2027/.test(t)) return PINNED.length;
+  const i = PINNED.findIndex((re) => re.test(t));
+  return i < 0 ? PINNED.length : i;
+};
 const ts = (v) => { const n = Date.parse(v); return isNaN(n) ? 0 : n; };
 
 async function load() {
@@ -47,11 +55,12 @@ async function load() {
       type: "MC_BATCH",
       category: categoryOf(exam + " " + r.name + " " + (r.class ? "class " + r.class : ""), r.class),
       slug: String(r.batch_id),
+      _p: pinRank(r.name),
       _u: Math.max(ts(r.start_date), ts(r.updated_at) ),
     });
   }
-  out.sort((a, b) => ((a.category in PRIORITY) ? 0 : 1) - ((b.category in PRIORITY) ? 0 : 1) || b._u - a._u);
-  out.forEach((b) => delete b._u);
+  out.sort((a, b) => (a._p - b._p) || (a._p < PINNED.length ? 0 : ((a.category in PRIORITY) ? 0 : 1) - ((b.category in PRIORITY) ? 0 : 1)) || b._u - a._u);
+  out.forEach((b) => { delete b._u; delete b._p; });
   return out;
 }
 
