@@ -34,17 +34,46 @@ function categoryFor(batch) {
 
 function deepSearchText(batch) {
   if (batch.__searchText) return batch.__searchText;
-  const parts = [batch.name, batch.byName, batch.language, batch.type, (batch.slug || "").replace(/-/g, " ")];
+  const parts = [batch.name, batch.byName, batch.language, batch.type, batch.category, (batch.slug || "").replace(/-/g, " ")];
   (batch.subBatches || []).forEach((sub) => parts.push(sub.name, sub.byName));
-  const text = parts.filter(Boolean).join(" ").toLowerCase();
+  let text = parts.filter(Boolean).join(" ").toLowerCase();
+  // class 12 / 12th / xii and class 10 / 10th / x all find each other
+  text += " " + text.replace(/\bclass\s*(\d{1,2})\+?/g, " $1th class$1 ").replace(/\b(\d{1,2})(st|nd|rd|th)\b/g, " $1 ");
   Object.defineProperty(batch, "__searchText", { value: text, enumerable: false, writable: true });
+  Object.defineProperty(batch, "__tokens", { value: Array.from(new Set(text.split(/[^a-z0-9\u0900-\u097f]+/).filter(Boolean))), enumerable: false, writable: true });
   return text;
 }
+
+// true when a and b differ by at most one edit (typo tolerance)
+function withinOneEdit(a, b) {
+  if (Math.abs(a.length - b.length) > 1) return false;
+  if (a.length === b.length) { // swapped neighbours (physcis -> physics) count as one typo too
+    let d = -1;
+    for (let k = 0; k < a.length; k++) if (a[k] !== b[k]) { d = k; break; }
+    if (d >= 0 && d + 1 < a.length && a[d] === b[d + 1] && a[d + 1] === b[d] && a.slice(d + 2) === b.slice(d + 2)) return true;
+  }
+  let i = 0, j = 0, edits = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) { i++; j++; continue; }
+    if (++edits > 1) return false;
+    if (a.length > b.length) i++; else if (a.length < b.length) j++; else { i++; j++; }
+  }
+  return edits + (a.length - i) + (b.length - j) <= 1;
+}
+
+const SEARCH_ALIASES = { "12th": "12", "xii": "12", "10th": "10", "xi": "11", "11th": "11", "board": "boards", "iit": "jee", "medical": "neet", "hindi": "hindi", "eng": "english", "bio": "biology", "phy": "physics", "chem": "chemistry", "maths": "math" };
 
 function deepSearchScore(batch, queryWords, rawQuery) {
   const name = (batch.name || "").toLowerCase();
   const text = deepSearchText(batch);
-  if (!queryWords.every((word) => text.includes(word))) return 0;
+  let fuzzy = false;
+  for (const raw of queryWords) {
+    const word = SEARCH_ALIASES[raw] && !text.includes(raw) ? SEARCH_ALIASES[raw] : raw;
+    if (text.includes(word)) continue;
+    if (word.length >= 4 && batch.__tokens.some((tok) => withinOneEdit(word, tok) || (tok.length >= 4 && withinOneEdit(word, tok.slice(0, word.length))))) { fuzzy = true; continue; }
+    return 0;
+  }
+  if (fuzzy) return 10;
   if (name === rawQuery) return 100;
   if (name.startsWith(rawQuery)) return 80;
   if (name.includes(rawQuery)) return 60;
@@ -56,6 +85,7 @@ function deepSearch(batches, query) {
   const rawQuery = query.trim().toLowerCase();
   if (!rawQuery) return batches;
   const queryWords = rawQuery.split(/\s+/).filter(Boolean);
+  // sort is stable, so equal scores keep the list order (JEE/NEET/Boards first, newest first)
   return batches
     .map((batch) => ({ batch, score: deepSearchScore(batch, queryWords, rawQuery) }))
     .filter((entry) => entry.score > 0)

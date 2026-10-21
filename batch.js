@@ -11,7 +11,7 @@
     play: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>'
   };
 
-  let batch = null, meta = null;
+  let batch = null, meta = null, live = null;
   let state = { tab: "lectures", s: null };
   let curList = [], filterText = "";
 
@@ -19,27 +19,12 @@
 
   async function init() {
     if (!/^[a-z0-9-]+$/i.test(batchId)) return fail("Batch not found.");
+    if (/^mc-/.test(batchId)) return initLive();
     try {
-      if (/^mc-/.test(batchId)) {
-        // live batch: built on the fly from the live source (first open of a big batch can take a little while)
-        const note = document.createElement("p");
-        note.className = "crumb"; note.style.textAlign = "center";
-        note.textContent = "Loading live batch… big batches can take up to a minute the first time.";
-        $("#page").appendChild(note);
-        const lr = await fetch("/api/live-batch?id=" + encodeURIComponent(batchId));
-        if (!lr.ok) throw new Error("not found");
-        batch = await lr.json();
-        batch.lectures = Array.isArray(batch.lectures) ? batch.lectures : [];
-        batch.notes = Array.isArray(batch.notes) ? batch.notes : [];
-        meta = { previewImage: batch.previewImage || "", language: batch.language || "" };
-        if (!batch.lectures.length && !batch.notes.length) return fail("No content has been published in this batch yet.");
-        if (batch.partial) setTimeout(() => toast("Big batch: some content is still loading. Reopen it in a minute to see everything."), 800);
-      } else {
-        const [dRes, bRes] = await Promise.all([fetch("data/" + batchId + ".json"), fetch("batches.json").catch(() => null)]);
-        if (!dRes.ok) throw new Error("not found");
-        batch = await dRes.json();
-        try { const bj = bRes && (await bRes.json()); meta = (bj.batches || []).find((b) => b._id === batchId) || null; } catch (e) {}
-      }
+      const [dRes, bRes] = await Promise.all([fetch("data/" + batchId + ".json"), fetch("batches.json").catch(() => null)]);
+      if (!dRes.ok) throw new Error("not found");
+      batch = await dRes.json();
+      try { const bj = bRes && (await bRes.json()); meta = (bj.batches || []).find((b) => b._id === batchId) || null; } catch (e) {}
     } catch (e) { return fail("This batch could not be loaded. Please go back and try again."); }
     document.title = batch.name + " — CODEX STUDYS";
     trackRecent();
@@ -69,12 +54,15 @@
     render(); window.scrollTo(0, 0);
   }
   window.addEventListener("popstate", (e) => {
-    if ($("#lv").classList.contains("open") && !(e.state && e.state.p)) closeOverlay(true);
+    const wasOpen = $("#lv").classList.contains("open");
+    if (wasOpen && !(e.state && e.state.p)) closeOverlay(true);
+    if (live && wasOpen && e.state && e.state.sub === state.sub && e.state.top === state.top && e.state.ct === state.ct) return; // just closed the player: page behind is already right
+    if (live) { const st = e.state || {}; liveNav(st.sub != null ? st.sub : liveHash().sub, st.sub != null ? st.top : liveHash().top, st.ct || liveHash().ct, "none"); return; }
     state = (e.state && e.state.tab) ? { tab: e.state.tab, s: e.state.s === undefined ? null : e.state.s } : readHash();
     filterText = ""; render();
   });
   $("#backBtn").addEventListener("click", () => {
-    if (state.s !== null) { history.back(); return; }
+    if (live ? state.sub != null : state.s !== null) { history.back(); return; }
     if (document.referrer && new URL(document.referrer).origin === location.origin && history.length > 1) history.back();
     else location.href = "index.html#courses";
   });
@@ -201,13 +189,195 @@
     else window.open(url, "_blank", "noopener,noreferrer");
   }
 
+  /* ---------- live (Macro) batches: loaded lazily, one small request per tap ---------- */
+  const enc = encodeURIComponent;
+  const LTABS = [["videos", "Lectures"], ["notes", "Notes"], ["DppNotes", "DPP PDF"], ["DppVideos", "DPP Videos"], ["DppTests", "DPP Tests"], ["exercises", "Practice"]];
+  const NOTE_TYPES = ["notes", "DppNotes", "exercises"];
+  const lcache = {};
+  let liveTok = 0;
+
+  async function lget(key, url) {
+    if (lcache[key]) return lcache[key];
+    const r = await fetch(url);
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j || j.success === false) throw new Error((j && j.message) || "failed");
+    lcache[key] = j;
+    return j;
+  }
+
+  function liveHash() {
+    const g = (k) => { const m = location.hash.match(new RegExp("[#&]" + k + "=([A-Za-z0-9]+)")); return m ? m[1] : null; };
+    const sub = g("sub"), top = g("top");
+    return { sub: sub != null ? +sub : null, top: sub != null && top != null ? +top : null, ct: g("ct") || "videos" };
+  }
+  function liveHashStr(st) {
+    if (st.sub == null) return location.pathname + location.search;
+    return "#sub=" + st.sub + (st.top != null ? "&top=" + st.top + "&ct=" + st.ct : "");
+  }
+
+  async function initLive() {
+    try {
+      const j = await lget("details", "/api/live?op=details&id=" + enc(batchId));
+      live = j;
+    } catch (e) { return fail("This batch could not be loaded. Please go back and try again."); }
+    batch = { name: live.name, by: live.by, about: live.about, lectures: [], notes: [] };
+    meta = { previewImage: live.previewImage || "", language: live.language || "" };
+    document.title = batch.name + " — CODEX STUDYS";
+    trackRecent();
+    const h = liveHash();
+    const sub = h.sub != null && live.subjects[h.sub] ? h.sub : null;
+    const ct = LTABS.some((t) => t[0] === h.ct) ? h.ct : "videos";
+    state = { tab: NOTE_TYPES.includes(ct) ? "notes" : "lectures", s: null, sub, top: sub == null ? null : h.top, ct };
+    history.replaceState(state, "");
+    liveRender();
+  }
+
+  // mode: "push" adds a history entry, "replace" swaps the current one, "none" only renders (back/forward)
+  function liveNav(sub, top, ct, mode) {
+    ct = LTABS.some((t) => t[0] === ct) ? ct : "videos";
+    if (sub != null && !live.subjects[sub]) { sub = null; top = null; }
+    state = { tab: NOTE_TYPES.includes(ct) ? "notes" : "lectures", s: sub == null || top == null ? null : 0, sub, top: sub == null ? null : top, ct };
+    filterText = "";
+    if (mode === "push") history.pushState(state, "", liveHashStr(state));
+    else if (mode === "replace") history.replaceState(state, "", liveHashStr(state));
+    liveRender();
+    if (mode === "push") window.scrollTo(0, 0);
+  }
+
+  const lSkeleton = '<div class="list"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>';
+  function lError(msg) {
+    $("#page").innerHTML = '<div class="empty">' + esc(msg) + '<br><br><button class="pill-btn solid" id="lvRetry" type="button">Retry</button></div>';
+    $("#lvRetry").addEventListener("click", () => { Object.keys(lcache).forEach((k) => { if (k !== "details") delete lcache[k]; }); liveRender(); });
+  }
+
+  function fmtTime(v) { const d = new Date(v); return isNaN(d) ? "" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+  function classStatus(it) {
+    const raw = it.status || "";
+    if (/end|complet|expired/.test(raw)) return "Ended";
+    if (/live|ongoing|started/.test(raw)) return "Live";
+    if (/upcoming|todo|scheduled/.test(raw)) return "Upcoming";
+    const now = Date.now(), st = Date.parse(it.start), en = Date.parse(it.end);
+    if (!isNaN(en) && now > en) return "Ended";
+    if (!isNaN(st) && now < st) return "Upcoming";
+    return !isNaN(st) && !isNaN(en) ? "Live" : "";
+  }
+  async function liveToday(tok) {
+    const list = $("#page").querySelector(".list");
+    if (!list) return;
+    let items = [];
+    try { items = (await lget("today", "/api/live?op=today&id=" + enc(batchId))).items || []; } catch (e) { return; }
+    delete lcache.today; // always fresh
+    if (tok !== liveTok || state.sub != null) return;
+    const wrap = document.createElement("div");
+    wrap.className = "today";
+    wrap.innerHTML = '<h3 class="today-h">Today\'s classes</h3>' + (items.length ? '<div class="today-row">' + items.map((it, i) => {
+      const st = classStatus(it), when = [fmtTime(it.start), fmtTime(it.end)].filter(Boolean).join(" – ");
+      return '<button class="today-card" type="button" data-td="' + i + '"><span class="today-thumb">' + (it.thumb ? '<img src="' + esc(it.thumb) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">' : "") +
+        (st ? '<span class="today-st ' + st.toLowerCase() + '">' + st + "</span>" : "") + '<span class="today-play">' + ICON.play + '</span></span><span class="today-t">' + esc(it.title) + '</span><span class="today-m">' + esc([when, it.type].filter(Boolean).join(" · ")) + "</span></button>";
+    }).join("") + "</div>" : '<p class="crumb">No class scheduled for today.</p>');
+    list.parentNode.insertBefore(wrap, list);
+    wrap.querySelectorAll("[data-td]").forEach((b) => b.addEventListener("click", () => {
+      const fallback = live.subjects[0] ? live.subjects[0]._id : "";
+      batch.lectures = [{ n: "Today's classes", i: items.map((it) => [it.title, "mc:" + live.batchId + "|" + (it.subjectId || fallback) + "|" + it.id, "m"]) }];
+      batch.notes = [];
+      buildFlat();
+      state.s = 0;
+      openLecture(+b.dataset.td);
+    }));
+  }
+
+  async function liveRender() {
+    const tok = ++liveTok;
+    const page = $("#page");
+    if (state.sub == null) {
+      $("#topTitle").textContent = live.name;
+      const img = meta.previewImage || "assets/codex-telegram.png";
+      let html = '<div class="hero"><img class="hero-img" src="' + esc(img) + '" alt="' + esc(live.name) + '" referrerpolicy="no-referrer" onerror="this.src=\'assets/codex-telegram.png\'">' +
+        '<div class="hero-body"><h2 class="hero-title">' + esc(live.name) + '</h2><p class="hero-sub">' + esc(live.by || "") + '</p>' +
+        '<div class="badges"><span class="badge accent">Live</span><span class="badge">' + esc(meta.language || "Hinglish") + '</span></div></div></div>';
+      if (live.about) html += '<div class="about-card" style="margin-bottom:14px"><p>' + esc(live.about.length > 400 ? live.about.slice(0, 400) + "…" : live.about) + '</p></div>';
+      html += '<div class="list">' + (live.subjects.length ? live.subjects.map((sj, i) =>
+        '<button class="row chapter" type="button" data-sub="' + i + '"><span class="row-main"><span class="row-name">' + esc(sj.name) + '</span><span class="row-sub">' + (sj.count ? sj.count + (sj.count === 1 ? " Lecture" : " Lectures") : "View topics") + '</span></span>' + ICON.chev + "</button>").join("") : '<div class="empty">No subjects published for this batch yet.</div>') + "</div>";
+      page.innerHTML = html;
+      page.querySelectorAll("[data-sub]").forEach((b) => b.addEventListener("click", () => liveNav(+b.dataset.sub, null, "videos", "push")));
+      liveToday(tok);
+      return;
+    }
+    const sj = live.subjects[state.sub];
+    if (state.top == null) {
+      $("#topTitle").textContent = sj.name;
+      page.innerHTML = lSkeleton;
+      let topics;
+      try { topics = (await lget("t" + state.sub, "/api/live?op=topics&slug=" + enc(live.slug) + "&sub=" + enc(sj.slug))).topics || []; }
+      catch (e) { if (tok === liveTok) lError("Couldn't load the topics. Please retry."); return; }
+      if (tok !== liveTok) return;
+      let h = '<p class="crumb">' + esc(live.name) + " › " + esc(sj.name) + "</p>";
+      if (topics.length > 10) h += '<input class="search" id="topSearch" type="search" placeholder="Search topics…" autocomplete="off">';
+      h += '<div class="list" id="topList"></div>';
+      page.innerHTML = h;
+      const draw = (q) => {
+        const rows = topics.map((t, i) => [t, i]).filter(([t]) => !q || t.name.toLowerCase().includes(q));
+        $("#topList").innerHTML = rows.length ? rows.map(([t, i]) =>
+          '<button class="row chapter" type="button" data-top="' + i + '"><span class="row-main"><span class="row-name">' + esc(t.name) + '</span><span class="row-sub">' + (t.lectures || 0) + " Lectures" + (t.notes ? " | " + t.notes + " Notes" : "") + "</span></span>" + ICON.chev + "</button>").join("") : '<div class="empty">No topics found.</div>';
+        $("#topList").querySelectorAll("[data-top]").forEach((b) => b.addEventListener("click", () => liveNav(state.sub, +b.dataset.top, "videos", "push")));
+      };
+      draw("");
+      const ts = $("#topSearch"); if (ts) ts.addEventListener("input", () => draw(ts.value.trim().toLowerCase()));
+      return;
+    }
+    // topic: Lectures / Notes / DPP PDF / DPP Videos
+    page.innerHTML = lSkeleton;
+    let topics;
+    try { topics = (await lget("t" + state.sub, "/api/live?op=topics&slug=" + enc(live.slug) + "&sub=" + enc(sj.slug))).topics || []; }
+    catch (e) { if (tok === liveTok) lError("Couldn't load this topic. Please retry."); return; }
+    if (tok !== liveTok) return;
+    const topic = topics[state.top];
+    if (!topic) { liveNav(state.sub, null, "videos", "replace"); return; }
+    $("#topTitle").textContent = topic.name;
+    const tabs = '<div class="tabs scroll">' + LTABS.map((t) => '<button class="tab' + (state.ct === t[0] ? " active" : "") + '" data-ct="' + t[0] + '" type="button">' + t[1] + "</button>").join("") + "</div>";
+    page.innerHTML = tabs + lSkeleton;
+    const bindTabs = () => page.querySelectorAll("[data-ct]").forEach((b) => b.addEventListener("click", () => { if (b.dataset.ct !== state.ct) liveNav(state.sub, state.top, b.dataset.ct, "replace"); }));
+    bindTabs();
+    if (state.ct === "DppTests") {
+      batch.lectures = []; batch.notes = []; buildFlat();
+      let tests;
+      try { tests = (await lget("x" + state.sub + "|" + state.top, "/api/live?op=tests&id=" + enc(live.batchId) + "&subjectId=" + enc(sj._id) + "&topic=" + enc(topic.id))).tests || []; }
+      catch (e) { if (tok === liveTok) { page.innerHTML = tabs + '<div class="empty">Couldn\'t load the tests. Please retry.<br><br><button class="pill-btn solid" id="lvRetry3" type="button">Retry</button></div>'; bindTabs(); $("#lvRetry3").addEventListener("click", () => { delete lcache["x" + state.sub + "|" + state.top]; liveRender(); }); } return; }
+      if (tok !== liveTok) return;
+      page.innerHTML = tabs + (tests.length ? '<p class="crumb">' + esc(live.name) + " › DPP Tests › " + esc(topic.name) + '</p><div class="list">' + tests.map((t) =>
+        '<div class="row item"><span class="ico pdf" style="width:42px;height:42px;border-radius:13px">' + ICON.doc + '</span><span class="row-main"><span class="row-name">' + esc(t.name) + '</span><span class="row-sub">' +
+        esc([t.q ? t.q + " questions" : "", t.marks ? t.marks + " marks" : "", t.min ? t.min + " min" : ""].filter(Boolean).join(" · ")) + "</span></span></div>").join("") + "</div>" : '<div class="empty">Nothing published in this section yet.</div>');
+      bindTabs();
+      return;
+    }
+    let items;
+    try { items = (await lget("c" + state.sub + "|" + state.top + "|" + state.ct, "/api/live?op=contents&slug=" + enc(live.slug) + "&sub=" + enc(sj.slug) + "&topic=" + enc(topic.id) + "&type=" + state.ct)).items || []; }
+    catch (e) { if (tok === liveTok) { page.innerHTML = tabs + '<div class="empty">Couldn\'t load this section. Please retry.<br><br><button class="pill-btn solid" id="lvRetry2" type="button">Retry</button></div>'; bindTabs(); $("#lvRetry2").addEventListener("click", () => { delete lcache["c" + state.sub + "|" + state.top + "|" + state.ct]; liveRender(); }); } return; }
+    if (tok !== liveTok) return;
+    const isNotes = NOTE_TYPES.includes(state.ct);
+    const g = { n: topic.name, i: items.map((it) => isNotes
+      ? [(state.ct === "DppNotes" ? "DPP | " : state.ct === "exercises" ? "Practice | " : "") + it.title, "mcn:" + live.slug + "|" + sj.slug + "|" + it.id]
+      : [(state.ct === "DppVideos" ? "DPP | " : "") + it.title, "mc:" + live.batchId + "|" + sj._id + "|" + it.id, "m"]) };
+    batch.lectures = isNotes ? [] : [g];
+    batch.notes = isNotes ? [g] : [];
+    buildFlat();
+    state.s = 0;
+    page.innerHTML = tabs + (g.i.length ? renderItems(g) : '<div class="empty">Nothing published in this section yet.</div>');
+    bindTabs();
+    if (g.i.length) bindItems(g);
+  }
+
   /* ---------- lecture list + completion ---------- */
   const DONE_KEY = "cx-done";
   const RECENT_KEY = "codex-studys-recent-lectures";
   const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } };
   const readDone = () => { const m = lsGet(DONE_KEY, {}); return m && typeof m === "object" && !Array.isArray(m) ? m : {}; };
   let doneMap = readDone();
-  const lkey = (idx) => batchId + "-" + idx;
+  const lkey = (idx) => {
+    const f = flat[idx];
+    if (live && f) { const p = String(f.it[1]).split("|"); return batchId + "-" + p[p.length - 1]; }
+    return batchId + "-" + idx;
+  };
   const isDone = (idx) => !!doneMap[lkey(idx)];
   const isPdf = (u) => /\.pdf(\?|#|$)/i.test(String(u || ""));
   let flat = [], offsets = [], allVids = [], vids = [], lite = [], noteFlat = [], doneCount = 0, curG = -1;
@@ -274,6 +444,7 @@
 
   /* ---------- recently watched (lecture level) ---------- */
   function trackLecture(f) {
+    if (live) return;
     try {
       const kind = f.it[2], src = f.it[1];
       const thumb = kind === "y" ? "https://i.ytimg.com/vi/" + encodeURIComponent(src) + "/hqdefault.jpg" : ((meta && meta.previewImage) || "assets/batch-" + batchId + ".webp");
